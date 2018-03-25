@@ -9,8 +9,11 @@
 #include "resource.h"
 #include "BodyBasics.h"
 #include <Windows.h>
-#include "OscOutboundPacketStream.h"
-#include "UdpSocket.h"
+#include "oscpack_1_1_0\osc\OscOutboundPacketStream.cpp"
+#include "oscpack_1_1_0\ip\IpEndpointName.cpp"
+#include "oscpack_1_1_0\UdpSocket.cpp"
+#include "oscpack_1_1_0\NetworkingUtils.cpp"
+
 
 static const float c_JointThickness = 3.0f;
 static const float c_TrackedBoneThickness = 6.0f;
@@ -146,6 +149,8 @@ void ReadFromPipe(HWND hWnd, HANDLE g_hChildStd_OUT_Rd)
 	}
 }
 
+HANDLE g_hChildStd_OUT_Rd = NULL;
+HANDLE g_hChildStd_OUT_Wr = NULL;
 //Create window with face detection
 bool FaceDetect()
 {
@@ -153,13 +158,54 @@ bool FaceDetect()
 	PROCESS_INFORMATION pi;
 	ZeroMemory(&pi, sizeof(PROCESS_INFORMATION));
 	ZeroMemory(&siStartInfo, sizeof(STARTUPINFO));
+	siStartInfo.hStdOutput = g_hChildStd_OUT_Wr;
 
 	const TCHAR* target = L"D:\\Visual Studio Projects\\Kinect SDK\\FaceBasics-D2D\\Debug\\FaceBasics-D2D.exe";
 
 	if (!CreateProcess(target, 0, 0, FALSE, 0, 0, 0, 0, &siStartInfo, &pi))
 		return false;
 
+	SECURITY_ATTRIBUTES saAttr;
+	saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
+	saAttr.bInheritHandle = TRUE;
+	saAttr.lpSecurityDescriptor = NULL;
+
+	if (!CreatePipe(&g_hChildStd_OUT_Rd, &g_hChildStd_OUT_Wr, &saAttr, 0))
+		return false;
+
 	return true;
+}
+
+void ReadFromPipe(void)
+
+// Read output from the child process's pipe for STDOUT
+// and write to the parent process's pipe for STDOUT. 
+// Stop when there is no more data. 
+{
+	DWORD dwRead, dwWritten;
+	BOOL bSuccess = FALSE;
+
+	//Open the OSC packaging
+	UdpTransmitSocket transmitSocket(IpEndpointName("127.0.0.1", 80));
+	char buffer[1024];
+	osc::OutboundPacketStream p(buffer, 1024);
+
+	for (;;)
+	{
+		bSuccess = ReadFile(g_hChildStd_OUT_Rd, buffer, 1024, &dwRead, NULL);
+		if (!bSuccess || dwRead == 0) break;
+
+		bSuccess = WriteFile(NULL, buffer, dwRead, &dwWritten, NULL);
+
+		if (!bSuccess) break;
+
+		p << osc::BeginBundleImmediate
+			<< osc::BeginMessage("Labels")
+			<<(char)dwRead<< osc::EndMessage
+			<< osc::EndBundle;
+
+		transmitSocket.Send(p.Data(), p.Size());
+	}
 }
 
 void MainWindow(HWND bodyWnd, HWND faceWnd)
@@ -282,10 +328,6 @@ int CBodyBasics::Run(HINSTANCE hInstance, int nCmdShow)
 
 	MainWindow(hWndApp, hWndApp);
 
-	UdpTransmitSocket transmitSocket();
-	char buffer[1024];
-	osc::OutboundPacketStream p(buffer, 1024);
-
 	int currWnd = 0;
 	int prevWnd = 1;
     // Main message loop
@@ -302,12 +344,9 @@ int CBodyBasics::Run(HINSTANCE hInstance, int nCmdShow)
 		//	PostMessage(hWndApp[currWnd], WM_SYSCOMMAND, SC_RESTORE, 0);
 		//}
 
-		p << osc::BeginBundleImmediate
-			<< osc::BeginMessage("Labels")
-			<<  << osc::EndMessage
-			<< osc::EndBundle;
+		//Send the package to a location via OSC	
+		ReadFromPipe();
 
-		transmitSocket().Send(p.Data(), p.Size());
 
         while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
         {
